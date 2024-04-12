@@ -15,7 +15,7 @@ terraform {
   }
 }
 
-resource "aws_dynamodb_table" "sen-learning-dynamodb" {
+resource "aws_dynamodb_table" "sen_learning_dynamodb" {
   name         = "sen-learning-dynamodb"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "catname"
@@ -31,12 +31,12 @@ resource "aws_dynamodb_table" "sen-learning-dynamodb" {
 
 }
 
-resource "aws_s3_bucket" "lambda" {
-  bucket        = "sen-learning-lambda"
-  force_destroy = true
-
-
+module "lambda_bucket" {
+  source = "./terraform/s3_bucket"
+  bucket_name = "sen-learning-lambda"
+  
 }
+
 data "archive_file" "feedcat" {
   type        = "zip"
   source_dir  = "${path.module}/feedcat/dist"
@@ -45,9 +45,10 @@ data "archive_file" "feedcat" {
 }
 
 resource "aws_s3_object" "feedcat" {
-  bucket = aws_s3_bucket.lambda.id
+  bucket = module.lambda_bucket.bucket_id
   key    = "feedcat.zip"
   source = data.archive_file.feedcat.output_path
+  etag = data.archive_file.feedcat.output_md5
 
 }
 
@@ -73,11 +74,16 @@ resource "aws_iam_role_policy_attachment" "feedcat" {
 }
 resource "aws_lambda_function" "feedcat" {
   function_name = "feedcat"
-  s3_bucket     = aws_s3_bucket.lambda.bucket
+  s3_bucket     = module.lambda_bucket.bucket_id
   s3_key        = aws_s3_object.feedcat.key
   handler       = "handler.run"
   runtime       = "nodejs16.x"
   role          = aws_iam_role.lambda.arn
+  environment {
+    variables = {
+      TABLE_NAME = aws_dynamodb_table.sen_learning_dynamodb.name
+    }
+  }
 
 }
 resource "aws_apigatewayv2_api" "feedcat" {
@@ -107,7 +113,7 @@ resource "aws_apigatewayv2_route" "feedcat" {
   api_id    = aws_apigatewayv2_api.feedcat.id
   route_key = "POST /cat"
   target    = "integrations/${aws_apigatewayv2_integration.feedcat.id}"
-  
+
 }
 
 resource "aws_lambda_permission" "feedcat" {
@@ -116,5 +122,30 @@ resource "aws_lambda_permission" "feedcat" {
   function_name = aws_lambda_function.feedcat.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.feedcat.execution_arn}/*/*"
-  
+
 }
+
+resource "aws_iam_policy" "dbwrite" {
+  name        = "sen-learning-dynamodb-write"
+  description = "Allow write to feedcat dynamodb"
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:PutItem"
+        ]
+        Resource = aws_dynamodb_table.sen_learning_dynamodb.arn
+      },
+    ]
+  })
+
+}
+
+resource "aws_iam_role_policy_attachment" "feed_cats_dbwrite" {
+  role       = aws_iam_role.lambda.name
+  policy_arn = aws_iam_policy.dbwrite.arn
+
+}
+
